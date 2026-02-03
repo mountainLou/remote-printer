@@ -1,0 +1,54 @@
+version: '3.8'
+
+services:
+  remote-printer:
+    build: .
+    container_name: remote-printer-app
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      # 请根据你的CUPS服务配置以下环境变量
+      - CUPS_BASE_URL=http://cups:631
+      - CUPS_USERNAME=
+      - CUPS_PASSWORD=
+      - DEFAULT_PRINTER=Cannon_Printer
+    volumes:
+      # 持久化上传文件
+      - ./uploads:/app/uploads
+      # 持久化打印历史记录
+      - ./data:/app/data
+    networks:
+      - printer-network
+    depends_on:
+      - cups
+
+  # 如果你需要单独运行CUPS服务（可选）
+  cups:
+    image: cups/cups:latest
+    container_name: cups-service
+    restart: unless-stopped
+    ports:
+      - "631:631"
+    environment:
+      - CUPS_USER=admin
+      - CUPS_PASSWORD=admin
+    volumes:
+      # 持久化CUPS配置和spool目录
+      - cups-config:/etc/cups
+      - cups-logs:/var/log/cups
+      - cups-spool:/var/spool/cups
+    networks:
+      - printer-network
+    # 如果需要访问本地打印机，需要配置network_mode: host或使用其他方式
+
+networks:
+  printer-network:
+    driver: bridge
+
+volumes:
+  cups-config:
+  cups-logs:
+  cups-spool:
