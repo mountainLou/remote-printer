@@ -69,7 +69,17 @@ function getPrinterJobs(printerUrl) {
             'operation-attributes-tag': {
                 'requesting-user-name': 'test-user',
                 'which-jobs': 'all',
-                'limit': 20
+                'limit': 20,
+                'requested-attributes': [
+                    'job-id',
+                    'job-name',
+                    'job-state',
+                    'job-originating-user-name',
+                    'job-creation-time',
+                    'job-pages',
+                    'copies',
+                    'job-uri'
+                ]
             }
         };
 
@@ -90,9 +100,12 @@ function getPrinterJobs(printerUrl) {
  */
 function formatPrinterState(state) {
     const states = {
-        3: '空闲 (Idle)',
-        4: '处理中 (Processing)',
-        5: '已停止 (Stopped)'
+        3: '空闲',
+        4: '处理中',
+        5: '已停止',
+        'idle': '空闲',
+        'processing': '处理中',
+        'stopped': '已停止'
     };
     return states[state] || `未知 (${state})`;
 }
@@ -104,12 +117,18 @@ function formatPrinterState(state) {
  */
 function formatJobState(state) {
     const states = {
-        3: '等待中 (Pending)',
-        4: '处理中 (Processing)',
-        5: '已完成 (Completed)',
-        6: '已取消 (Canceled)',
-        7: '已中止 (Aborted)',
-        8: '未知 (Unknown)'
+        3: '等待中',
+        4: '处理中',
+        5: '已完成',
+        6: '已取消',
+        7: '已中止',
+        8: '未知',
+        'pending': '等待中',
+        'processing': '处理中',
+        'completed': '已完成',
+        'canceled': '已取消',
+        'aborted': '已中止',
+        'unknown': '未知'
     };
     return states[state] || `未知 (${state})`;
 }
@@ -132,7 +151,16 @@ async function main() {
     try {
         // 获取打印机属性
         console.log('--- 正在获取打印机属性 ---');
-        const attributes = await getPrinterAttributes(printerUrl);
+        let attributes = await getPrinterAttributes(printerUrl);
+
+        // 提取printer-attributes-tag中的属性到根对象
+        if (attributes && attributes['printer-attributes-tag']) {
+            const attrs = attributes['printer-attributes-tag'];
+            attributes = {
+                ...attributes,
+                ...attrs
+            };
+        }
 
         console.log('\n[打印机基本信息]');
         console.log(`打印机名称: ${attributes['printer-name'] || 'N/A'}`);
@@ -162,17 +190,26 @@ async function main() {
 
             if (jobAttributes.length > 0) {
                 jobAttributes.forEach((job, index) => {
+                    // 提取job-attributes-tag中的属性到根对象
+                    let jobData = job;
+                    if (job['job-attributes-tag']) {
+                        jobData = {
+                            ...job,
+                            ...job['job-attributes-tag']
+                        };
+                    }
+
                     console.log(`\n任务 #${index + 1}:`);
-                    console.log(`  任务ID: ${job['job-id'] || 'N/A'}`);
-                    console.log(`  任务名称: ${job['job-name'] || 'N/A'}`);
-                    console.log(`  状态: ${formatJobState(job['job-state'])}`);
-                    console.log(`  用户: ${job['job-originating-user-name'] || 'N/A'}`);
-                    if (job['job-creation-time']) {
-                        const date = new Date(job['job-creation-time'] * 1000);
+                    console.log(`  任务ID: ${jobData['job-id'] || 'N/A'}`);
+                    console.log(`  任务名称: ${jobData['job-name'] || 'N/A'}`);
+                    console.log(`  状态: ${formatJobState(jobData['job-state'])}`);
+                    console.log(`  用户: ${jobData['job-originating-user-name'] || 'N/A'}`);
+                    if (jobData['job-creation-time']) {
+                        const date = new Date(jobData['job-creation-time'] * 1000);
                         console.log(`  创建时间: ${date.toLocaleString('zh-CN')}`);
                     }
-                    console.log(`  页数: ${job['job-pages'] || 'N/A'}`);
-                    console.log(`  份数: ${job['copies'] || 1}`);
+                    console.log(`  页数: ${jobData['job-pages'] || 'N/A'}`);
+                    console.log(`  份数: ${jobData['copies'] || 1}`);
                 });
             } else {
                 console.log('  (当前没有任务)');

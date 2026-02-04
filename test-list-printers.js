@@ -91,6 +91,44 @@ function getPrinterDetails(printerName) {
 }
 
 /**
+ * 尝试获取打印机详情（即使有错误也返回响应）
+ * @param {string} printerName - 打印机名称
+ * @returns {Promise} 包含打印机属性的Promise
+ */
+function tryGetPrinterDetails(printerName) {
+    return new Promise((resolve) => {
+        const printerUrl = `${CUPS_SERVER_URL}/printers/${encodeURIComponent(printerName)}`;
+        const printer = new ipp.Printer(printerUrl);
+
+        const msg = {
+            'operation-attributes-tag': {
+                'requesting-user-name': 'test-user',
+                'requested-attributes': [
+                    'printer-name',
+                    'printer-state',
+                    'printer-state-message',
+                    'printer-is-accepting-jobs',
+                    'printer-location',
+                    'printer-make-and-model',
+                    'printer-uri-supported',
+                    'printer-info',
+                    'queued-job-count',
+                    'completed-job-count'
+                ]
+            }
+        };
+
+        printer.execute('Get-Printer-Attributes', msg, (err, res) => {
+            if (err) {
+                resolve({ error: err, response: res });
+            } else {
+                resolve({ error: null, response: res });
+            }
+        });
+    });
+}
+
+/**
  * 格式化打印机状态
  * @param {number} state - 打印机状态码
  * @returns {string} 状态描述
@@ -99,7 +137,10 @@ function formatPrinterState(state) {
     const states = {
         3: '空闲',
         4: '处理中',
-        5: '已停止'
+        5: '已停止',
+        'idle': '空闲',
+        'processing': '处理中',
+        'stopped': '已停止'
     };
     return states[state] || `未知 (${state})`;
 }
@@ -117,14 +158,17 @@ async function main() {
 
     try {
         // 方法1：使用CUPS-Get-Printers获取所有打印机
-        console.log('--- 使用CUPS-Get-Printers方法 ---');
         let printers = await getAllPrinters(CUPS_SERVER_URL);
 
-        // 如果CUPS-Get-Printers不支持，尝试使用Get-Printer-Attributes
-        if (!printers || Object.keys(printers).length === 0) {
-            console.log('\nCUPS-Get-Printers不支持，尝试直接访问服务器...\n');
+        // 检查是否返回了错误或者没有打印机数据
+        const hasError = printers && (printers.statusCode && printers.statusCode.startsWith('server-error-'));
+        const hasPrinters = printers && (printers['printer-name'] || printers['printer-attributes-tag'] || (Array.isArray(printers) && printers.length > 0));
 
-            // 创建一个IPP打印机对象来查询默认打印机
+        // 如果CUPS-Get-Printers不支持或返回空，尝试其他方法
+        if (hasError || !hasPrinters) {
+            console.log('CUPS-Get-Printers不支持，尝试其他方法...\n');
+
+            // 方法2：尝试使用Get-Printer-Attributes直接查询服务器
             const printer = new ipp.Printer(CUPS_SERVER_URL);
 
             const msg = {
@@ -140,15 +184,51 @@ async function main() {
                 }
             };
 
-            printers = await new Promise((resolve, reject) => {
-                printer.execute('Get-Printer-Attributes', msg, (err, res) => {
-                    if (err) {
-                        reject(err);
-                    } else {
-                        resolve([res]);
-                    }
+            try {
+                const serverAttrs = await new Promise((resolve, reject) => {
+                    printer.execute('Get-Printer-Attributes', msg, (err, res) => {
+                        if (err) {
+                            reject(err);
+                        } else {
+                            resolve(res);
+                        }
+                    });
                 });
-            });
+
+                // 检查是否返回了错误
+                if (serverAttrs.statusCode && serverAttrs.statusCode.startsWith('client-error-')) {
+                    throw new Error(serverAttrs['status-message'] || 'Client error');
+                }
+
+                if (serverAttrs && Object.keys(serverAttrs).length > 0) {
+                    printers = [serverAttrs];
+                }
+            } catch (err) {
+                // 方法3：尝试常见的打印机名称
+                const commonNames = ['7100cn', 'HP_LaserJet_7100cn', 'HP-7100cn', 'printer'];
+                let foundPrinters = [];
+
+                for (const name of commonNames) {
+                    try {
+                        const result = await tryGetPrinterDetails(name);
+                        
+                        // 检查响应是否包含有效的打印机数据
+                        if (result.response && result.response.statusCode === 'successful-ok') {
+                            // 成功找到打印机，添加名称字段
+                            result.response['printer-name'] = result.response['printer-name'] || name;
+                            foundPrinters.push(result.response);
+                        } else if (result.response && result.response['printer-name']) {
+                            foundPrinters.push(result.response);
+                        }
+                    } catch (err) {
+                        // 忽略错误，继续尝试下一个名称
+                    }
+                }
+
+                if (foundPrinters.length > 0) {
+                    printers = foundPrinters;
+                }
+            }
         }
 
         // 处理返回的打印机数据
@@ -176,6 +256,18 @@ async function main() {
                 }
             }
         }
+
+        // 提取printer-attributes-tag中的属性到根对象
+        printerList = printerList.map(printer => {
+            if (printer['printer-attributes-tag']) {
+                const attrs = printer['printer-attributes-tag'];
+                return {
+                    ...printer,
+                    ...attrs
+                };
+            }
+            return printer;
+        });
 
         // 显示打印机列表
         if (printerList.length > 0) {

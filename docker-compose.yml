@@ -2,7 +2,9 @@ version: '3.8'
 
 services:
   remote-printer:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: remote-printer-app
     restart: unless-stopped
     ports:
@@ -10,11 +12,13 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=3000
-      # 请根据你的CUPS服务配置以下环境变量
-      - CUPS_BASE_URL=http://cups:631
-      - CUPS_USERNAME=
-      - CUPS_PASSWORD=
-      - DEFAULT_PRINTER=Cannon_Printer
+      # CUPS服务配置 - 请根据你的实际CUPS服务配置
+      - CUPS_BASE_URL=http://192.168.1.113:3631
+      - CUPS_USERNAME=admin
+      - CUPS_PASSWORD=admin
+      - DEFAULT_PRINTER=7100cn
+      - JWT_SECRET=your-secret-key-change-in-production
+      - MAX_FILE_SIZE=10485760
     volumes:
       # 持久化上传文件
       - ./uploads:/app/uploads
@@ -24,17 +28,39 @@ services:
       - printer-network
     depends_on:
       - cups
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
 
-  # 如果你需要单独运行CUPS服务（可选）
+  # CUPS服务（可选，如果已有CUPS服务可以注释掉）
   cups:
     image: cups/cups:latest
     container_name: cups-service
     restart: unless-stopped
     ports:
-      - "631:631"
+      - "631:631/tcp"
+      - "631:631/udp"
     environment:
       - CUPS_USER=admin
       - CUPS_PASSWORD=admin
+      - CUPS_ADMIN_USER=admin
+      - CUPS_ADMIN_PASSWORD=admin
     volumes:
       # 持久化CUPS配置和spool目录
       - cups-config:/etc/cups
@@ -43,12 +69,38 @@ services:
     networks:
       - printer-network
     # 如果需要访问本地打印机，需要配置network_mode: host或使用其他方式
+    # network_mode: host
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:631/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
 
 networks:
   printer-network:
     driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
 
 volumes:
   cups-config:
+    driver: local
   cups-logs:
+    driver: local
   cups-spool:
+    driver: local

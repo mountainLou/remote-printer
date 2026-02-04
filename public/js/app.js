@@ -247,7 +247,7 @@ async function loadCurrentJobs() {
                         </div>
                         ${job.status === 'processing' ? `
                             <div class="job-actions">
-                                <button class="btn btn-danger" onclick="cancelJob('${job.id}')">
+                                <button class="btn btn-danger" onclick="cancelJob('${job.id}', '${job.printer}')">
                                     取消任务
                                 </button>
                             </div>
@@ -342,14 +342,18 @@ async function loadPrintHistory() {
 }
 
 // 取消打印任务
-async function cancelJob(jobId) {
+async function cancelJob(jobId, printer) {
     if (!confirm('确定要取消这个打印任务吗？')) {
         return;
     }
 
     try {
         const response = await authenticatedFetch(`${API_BASE}/jobs/${jobId}/cancel`, {
-            method: 'POST'
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ printer: printer })
         });
         const data = await response.json();
 

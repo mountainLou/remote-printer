@@ -40,7 +40,9 @@ remote-printer/
 ├── package.json           # Node.js依赖
 ├── Dockerfile            # Docker镜像构建文件
 ├── docker-compose.yml    # Docker Compose配置
+├── .dockerignore        # Docker构建忽略文件
 ├── .env.example          # 环境变量示例
+├── DOCKER.md            # Docker部署详细文档
 └── README.md             # 项目文档
 ```
 
@@ -113,6 +115,10 @@ npm start
 
 ### Docker部署
 
+详细的Docker部署指南请参考 [DOCKER.md](DOCKER.md)
+
+快速开始：
+
 1. **配置环境变量**
 
 编辑 `docker-compose.yml` 中的环境变量。
@@ -126,6 +132,10 @@ docker-compose up -d
 3. **访问应用**
 
 打开浏览器访问: `http://localhost:3000`
+
+**默认账号**:
+- 用户名: admin
+- 密码: admin123
 
 ## 用户认证
 

@@ -1,10 +1,46 @@
+# 依赖
 node_modules
 npm-debug.log
+yarn-error.log
+
+# 测试
+coverage
+.nyc_output
+
+# 环境变量
 .env
+.env.local
+.env.*.local
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# 操作系统
+.DS_Store
+Thumbs.db
+
+# 上传文件（通过volume挂载）
 uploads/*
 !uploads/.gitkeep
+
+# 历史记录（通过volume挂载）
 data/*
 !data/.gitkeep
+
+# 日志
+logs
+*.log
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Git
 .git
 .gitignore
 README.md
