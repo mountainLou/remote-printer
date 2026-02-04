@@ -14,24 +14,46 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // CUPS配置
-const CUPS_BASE_URL = process.env.CUPS_BASE_URL || 'http://localhost:631';
+const CUPS_BASE_URL = process.env.CUPS_BASE_URL || 'http://192.168.1.113:3631';
 const CUPS_USERNAME = process.env.CUPS_USERNAME || '';
 const CUPS_PASSWORD = process.env.CUPS_PASSWORD || '';
 
+// 日志函数
+function log(level, message, data = null) {
+    const timestamp = new Date().toISOString();
+    const logEntry = `[${timestamp}] [${level}] ${message}`;
+    console.log(logEntry);
+    if (data) {
+        console.log(JSON.stringify(data, null, 2));
+    }
+}
+
 // IPP客户端配置
-function createIppClient() {
+function createIppClient(printerName = '') {
     const url = new URL(CUPS_BASE_URL);
+    let printerUrl = url.href;
+
+    // 如果指定了打印机名称，构建完整的打印机URL
+    if (printerName) {
+        printerUrl = `${url.href}/printers/${encodeURIComponent(printerName)}`;
+    }
+
     const options = {
         version: '2.0',
-        uri: url.href
+        uri: printerUrl,
+        host: url.hostname,
+        port: url.port || 3631,
+        protocol: url.protocol.replace(':', '')
     };
-    
+
     if (CUPS_USERNAME && CUPS_PASSWORD) {
         options.username = CUPS_USERNAME;
         options.password = CUPS_PASSWORD;
     }
-    
-    return ipp.Printer(url.href, options);
+
+    log('DEBUG', '创建IPP客户端', { printerUrl, hasAuth: !!(CUPS_USERNAME && CUPS_PASSWORD) });
+
+    return new ipp.Printer(printerUrl, options);
 }
 
 // JWT密钥
@@ -261,6 +283,8 @@ app.post('/api/login', loginLimiter, (req, res) => {
     // 生成token
     const token = generateToken(username);
 
+    log('INFO', `用户登录成功: ${username}`);
+
     res.json({
         success: true,
         message: '登录成功',
@@ -288,18 +312,21 @@ app.get('/api/verify', authenticateToken, (req, res) => {
 // 受保护的API路由（需要认证）
 // 获取打印机列表
 app.get('/api/printers', authenticateToken, async (req, res) => {
+    log('INFO', '请求获取打印机列表', { username: req.user.username });
     const result = await getPrinters();
     res.json(result);
 });
 
 // 获取打印机状态
 app.get('/api/status', authenticateToken, async (req, res) => {
+    log('INFO', '请求获取打印机状态', { username: req.user.username });
     const result = await getPrinterStatus();
     res.json(result);
 });
 
 // 获取当前打印任务
 app.get('/api/jobs', authenticateToken, async (req, res) => {
+    log('INFO', '请求获取打印任务', { username: req.user.username });
     const result = await getJobs();
     res.json(result);
 });
@@ -308,45 +335,45 @@ app.get('/api/jobs', authenticateToken, async (req, res) => {
 app.post('/api/jobs/:jobId/cancel', authenticateToken, async (req, res) => {
     try {
         const { jobId } = req.params;
+        const { printer } = req.body;
 
-        const url = new URL(CUPS_BASE_URL);
-        const options = {
-            version: '2.0',
-            uri: url.href
-        };
-        
-        if (CUPS_USERNAME && CUPS_PASSWORD) {
-            options.username = CUPS_USERNAME;
-            options.password = CUPS_PASSWORD;
+        log('INFO', '请求取消打印任务', { jobId, printer, username: req.user.username });
+
+        if (!printer) {
+            return res.status(400).json({
+                success: false,
+                message: '请指定打印机名称'
+            });
         }
-        
-        const printer = new ipp.Printer(url.href, options);
-        
+
+        const printerClient = createIppClient(printer);
+
         const msg = {
             'operation-attributes-tag': {
-                'requesting-user-name': CUPS_USERNAME || 'anonymous',
+                'requesting-user-name': req.user.username,
                 'job-id': parseInt(jobId)
             }
         };
-        
-        printer.execute('Cancel-Job', msg, (err, response) => {
+
+        printerClient.execute('Cancel-Job', msg, (err, response) => {
             if (err) {
-                console.error('取消任务失败:', err);
+                log('ERROR', '取消任务失败', { error: err.message, jobId });
                 return res.json({
                     success: false,
                     message: '取消任务失败',
                     error: err.message
                 });
             }
-            
+
+            log('INFO', '取消任务成功', { jobId });
             res.json({
                 success: true,
                 message: '任务已取消'
             });
         });
     } catch (error) {
-        console.error('取消任务异常:', error);
-        res.json({
+        log('ERROR', '取消任务异常', { error: error.message });
+        res.status(500).json({
             success: false,
             message: '取消任务失败',
             error: error.message
@@ -376,11 +403,19 @@ app.post('/api/print', authenticateToken, upload.single('file'), async (req, res
         const { printer, copies } = req.body;
 
         if (!printer) {
+            fs.unlinkSync(req.file.path);
             return res.json({
                 success: false,
                 message: '请选择打印机'
             });
         }
+
+        log('INFO', '收到打印请求', {
+            filename: req.file.originalname,
+            printer,
+            copies: copies || 1,
+            username: req.user.username
+        });
 
         // 验证文件类型
         const fileType = await fromBuffer(fs.readFileSync(req.file.path));
@@ -394,21 +429,10 @@ app.post('/api/print', authenticateToken, upload.single('file'), async (req, res
 
         // 读取文件内容
         const fileContent = fs.readFileSync(req.file.path);
-        
+
         // 创建IPP打印请求
-        const url = new URL(CUPS_BASE_URL);
-        const options = {
-            version: '2.0',
-            uri: url.href
-        };
-        
-        if (CUPS_USERNAME && CUPS_PASSWORD) {
-            options.username = CUPS_USERNAME;
-            options.password = CUPS_PASSWORD;
-        }
-        
-        const printerClient = new ipp.Printer(url.href, options);
-        
+        const printerClient = createIppClient(printer);
+
         // 构建打印作业属性
         const printJob = {
             'operation-attributes-tag': {
@@ -424,25 +448,30 @@ app.post('/api/print', authenticateToken, upload.single('file'), async (req, res
         printerClient.execute('Print-Job', printJob, (err, response) => {
             // 清理上传的文件
             fs.unlinkSync(req.file.path);
-            
+
             if (err) {
-                console.error('打印失败:', err);
+                log('ERROR', '打印失败', { error: err.message, printer });
                 return res.json({
                     success: false,
                     message: '打印失败',
                     error: err.message
                 });
             }
-            
+
+            const jobId = response['job-id'];
+
+            log('INFO', '打印任务提交成功', { jobId, printer });
+
             // 记录到历史
             const history = readHistory();
             const historyRecord = {
-                id: response['job-id'] || Date.now(),
+                id: jobId || Date.now(),
                 filename: req.file.originalname,
                 printer: printer,
                 printedAt: new Date().toISOString(),
                 status: 'success',
-                size: formatFileSize(req.file.size)
+                size: formatFileSize(req.file.size),
+                user: req.user.username
             };
 
             history.unshift(historyRecord);
@@ -451,18 +480,18 @@ app.post('/api/print', authenticateToken, upload.single('file'), async (req, res
             res.json({
                 success: true,
                 message: '文件已添加到打印队列',
-                jobId: response['job-id'] || historyRecord.id
+                jobId: jobId || historyRecord.id
             });
         });
     } catch (error) {
-        console.error('打印失败:', error);
+        log('ERROR', '打印失败', { error: error.message });
 
         // 清理上传的文件
         if (req.file && fs.existsSync(req.file.path)) {
             fs.unlinkSync(req.file.path);
         }
 
-        res.json({
+        res.status(500).json({
             success: false,
             message: '打印失败: ' + error.message
         });
@@ -472,79 +501,163 @@ app.post('/api/print', authenticateToken, upload.single('file'), async (req, res
 // 获取打印机列表
 async function getPrinters() {
     try {
-        const url = new URL(CUPS_BASE_URL);
-        const options = {
-            version: '2.0',
-            uri: url.href
+        log('DEBUG', '正在获取打印机列表');
+
+        // 使用CUPS-Get-Printers操作获取所有打印机
+        const printer = createIppClient();
+
+        const msg = {
+            'operation-attributes-tag': {
+                'requesting-user-name': CUPS_USERNAME || 'anonymous',
+                'requested-attributes': [
+                    'printer-name',
+                    'printer-state',
+                    'printer-state-message',
+                    'printer-is-accepting-jobs',
+                    'printer-location',
+                    'printer-make-and-model',
+                    'printer-uri-supported',
+                    'printer-info',
+                    'queued-job-count'
+                ]
+            }
         };
-        
-        if (CUPS_USERNAME && CUPS_PASSWORD) {
-            options.username = CUPS_USERNAME;
-            options.password = CUPS_PASSWORD;
-        }
-        
-        const printer = new ipp.Printer(url.href, options);
-        
-        return new Promise((resolve, reject) => {
-            printer.execute('Get-Printer-Attributes', null, (err, res) => {
+
+        return new Promise((resolve) => {
+            printer.execute('CUPS-Get-Printers', msg, (err, res) => {
                 if (err) {
-                    console.error('获取打印机列表失败:', err);
-                    resolve({ success: false, message: '获取打印机列表失败', error: err.message });
-                    return;
+                    log('ERROR', '获取打印机列表失败', { error: err.message });
+                    // 尝试备用方法
+                    return getPrintersFallback().then(resolve);
                 }
-                
+
                 // 解析IPP响应
                 const printers = [];
-                
-                // IPP响应直接包含打印机属性
-                if (res) {
-                    const printerName = res['printer-name'] || res['printer-name-set'] || process.env.DEFAULT_PRINTER || 'Default Printer';
-                    const printerState = res['printer-state'];
-                    const stateText = printerState === 3 ? 'idle' : printerState === 4 ? 'processing' : printerState === 5 ? 'stopped' : 'unknown';
-                    
-                    printers.push({
-                        name: printerName,
-                        state: stateText,
-                        isOnline: printerState !== 5,
-                        jobs: 0
+
+                if (res && res['printer-attributes-tag']) {
+                    const printerAttributes = Array.isArray(res['printer-attributes-tag'])
+                        ? res['printer-attributes-tag']
+                        : [res['printer-attributes-tag']];
+
+                    printerAttributes.forEach(attr => {
+                        if (attr && attr['printer-name']) {
+                            const printerState = attr['printer-state'];
+                            const stateText = printerState === 3 ? 'idle' :
+                                            printerState === 4 ? 'processing' :
+                                            printerState === 5 ? 'stopped' : 'unknown';
+
+                            printers.push({
+                                name: attr['printer-name'],
+                                state: stateText,
+                                isOnline: printerState !== 5,
+                                isAcceptingJobs: !!attr['printer-is-accepting-jobs'],
+                                location: attr['printer-location'] || '',
+                                model: attr['printer-make-and-model'] || '',
+                                info: attr['printer-info'] || '',
+                                jobs: attr['queued-job-count'] || 0
+                            });
+                        }
                     });
                 }
-                
+
+                log('INFO', `找到 ${printers.length} 个打印机`);
+
                 resolve({ success: true, printers });
             });
         });
     } catch (error) {
-        console.error('获取打印机列表异常:', error);
-        return { success: false, message: '获取打印机列表失败', error: error.message };
+        log('ERROR', '获取打印机列表异常', { error: error.message });
+        return getPrintersFallback();
+    }
+}
+
+// 备用方法：直接获取单个打印机属性
+async function getPrintersFallback() {
+    try {
+        log('DEBUG', '使用备用方法获取打印机列表');
+
+        const printer = createIppClient();
+
+        const msg = {
+            'operation-attributes-tag': {
+                'requesting-user-name': CUPS_USERNAME || 'anonymous',
+                'requested-attributes': [
+                    'printer-name',
+                    'printer-state',
+                    'printer-state-message',
+                    'printer-is-accepting-jobs',
+                    'printer-location',
+                    'printer-make-and-model',
+                    'printer-uri-supported',
+                    'printer-info',
+                    'queued-job-count'
+                ]
+            }
+        };
+
+        return new Promise((resolve) => {
+            printer.execute('Get-Printer-Attributes', msg, (err, res) => {
+                if (err) {
+                    log('ERROR', '备用方法也失败', { error: err.message });
+                    resolve({
+                        success: false,
+                        message: '获取打印机列表失败',
+                        error: err.message
+                    });
+                    return;
+                }
+
+                // 解析IPP响应
+                const printers = [];
+
+                if (res && res['printer-name']) {
+                    const printerState = res['printer-state'];
+                    const stateText = printerState === 3 ? 'idle' :
+                                    printerState === 4 ? 'processing' :
+                                    printerState === 5 ? 'stopped' : 'unknown';
+
+                    printers.push({
+                        name: res['printer-name'],
+                        state: stateText,
+                        isOnline: printerState !== 5,
+                        isAcceptingJobs: !!res['printer-is-accepting-jobs'],
+                        location: res['printer-location'] || '',
+                        model: res['printer-make-and-model'] || '',
+                        info: res['printer-info'] || '',
+                        jobs: res['queued-job-count'] || 0
+                    });
+                }
+
+                log('INFO', `备用方法找到 ${printers.length} 个打印机`);
+
+                resolve({ success: true, printers });
+            });
+        });
+    } catch (error) {
+        log('ERROR', '备用方法异常', { error: error.message });
+        return {
+            success: false,
+            message: '获取打印机列表失败',
+            error: error.message
+        };
     }
 }
 
 // 获取打印机状态
 async function getPrinterStatus() {
     try {
-        const printers = await getPrinters();
+        const printersResult = await getPrinters();
 
-        if (!printers.success) {
-            return printers;
+        if (!printersResult.success) {
+            return printersResult;
         }
 
         // 获取每个打印机的任务数量
         const printersWithJobs = await Promise.all(
-            printers.printers.map(async (printer) => {
+            printersResult.printers.map(async (printer) => {
                 try {
-                    const url = new URL(CUPS_BASE_URL);
-                    const options = {
-                        version: '2.0',
-                        uri: url.href
-                    };
-                    
-                    if (CUPS_USERNAME && CUPS_PASSWORD) {
-                        options.username = CUPS_USERNAME;
-                        options.password = CUPS_PASSWORD;
-                    }
-                    
-                    const printerClient = new ipp.Printer(url.href, options);
-                    
+                    const printerClient = createIppClient(printer.name);
+
                     return new Promise((resolve) => {
                         const msg = {
                             'operation-attributes-tag': {
@@ -553,35 +666,30 @@ async function getPrinterStatus() {
                                 'limit': 100
                             }
                         };
-                        
+
                         printerClient.execute('Get-Jobs', msg, (err, res) => {
                             if (err) {
-                                console.error(`获取打印机${printer.name}任务数量失败:`, err);
+                                log('ERROR', `获取打印机${printer.name}任务数量失败`, { error: err.message });
                                 printer.jobs = 0;
                                 resolve(printer);
                                 return;
                             }
-                            
+
                             // 计算任务数量
                             if (res && res['job-attributes-tag']) {
-                                const jobAttributes = Array.isArray(res['job-attributes-tag']) 
-                                    ? res['job-attributes-tag'] 
+                                const jobAttributes = Array.isArray(res['job-attributes-tag'])
+                                    ? res['job-attributes-tag']
                                     : [res['job-attributes-tag']];
-                                
-                                // 过滤出当前打印机的任务
-                                const printerJobs = jobAttributes.filter(job => 
-                                    job['printer-uri'] && job['printer-uri'].includes(printer.name)
-                                );
-                                printer.jobs = printerJobs.length;
+                                printer.jobs = jobAttributes.length;
                             } else {
                                 printer.jobs = 0;
                             }
-                            
+
                             resolve(printer);
                         });
                     });
                 } catch (error) {
-                    console.error(`获取打印机${printer.name}状态异常:`, error);
+                    log('ERROR', `获取打印机${printer.name}状态异常`, { error: error.message });
                     printer.jobs = 0;
                     return printer;
                 }
@@ -593,27 +701,22 @@ async function getPrinterStatus() {
             printers: printersWithJobs
         };
     } catch (error) {
-        console.error('获取打印机状态异常:', error);
-        return { success: false, message: '获取打印机状态失败', error: error.message };
+        log('ERROR', '获取打印机状态异常', { error: error.message });
+        return {
+            success: false,
+            message: '获取打印机状态失败',
+            error: error.message
+        };
     }
 }
 
 // 获取打印任务
 async function getJobs() {
     try {
-        const url = new URL(CUPS_BASE_URL);
-        const options = {
-            version: '2.0',
-            uri: url.href
-        };
-        
-        if (CUPS_USERNAME && CUPS_PASSWORD) {
-            options.username = CUPS_USERNAME;
-            options.password = CUPS_PASSWORD;
-        }
-        
-        const printer = new ipp.Printer(url.href, options);
-        
+        log('DEBUG', '正在获取打印任务');
+
+        const printer = createIppClient();
+
         return new Promise((resolve) => {
             const msg = {
                 'operation-attributes-tag': {
@@ -622,41 +725,60 @@ async function getJobs() {
                     'limit': 100
                 }
             };
-            
+
             printer.execute('Get-Jobs', msg, (err, res) => {
                 if (err) {
-                    console.error('获取打印任务失败:', err);
-                    resolve({ success: false, message: '获取打印任务失败', error: err.message });
+                    log('ERROR', '获取打印任务失败', { error: err.message });
+                    resolve({
+                        success: false,
+                        message: '获取打印任务失败',
+                        error: err.message
+                    });
                     return;
                 }
-                
+
                 // 解析IPP响应
                 const jobs = [];
-                
+
                 if (res && res['job-attributes-tag']) {
-                    const jobAttributes = Array.isArray(res['job-attributes-tag']) 
-                        ? res['job-attributes-tag'] 
+                    const jobAttributes = Array.isArray(res['job-attributes-tag'])
+                        ? res['job-attributes-tag']
                         : [res['job-attributes-tag']];
-                    
+
                     jobAttributes.forEach(job => {
                         if (job && job['job-id']) {
                             jobs.push({
                                 id: job['job-id'],
-                                printer: job['printer-uri'] ? job['printer-uri'].split('/').pop() : 'Unknown Printer',
-                                status: job['job-state'] === 3 ? 'pending' : job['job-state'] === 4 ? 'processing' : job['job-state'] === 5 ? 'completed' : 'stopped',
-                                submittedAt: job['job-creation-time'] ? new Date(job['job-creation-time'] * 1000).toISOString() : new Date().toISOString(),
-                                userName: job['job-originating-user-name'] || 'Unknown User'
+                                printer: job['printer-uri'] ?
+                                    job['printer-uri'].split('/').pop() : 'Unknown Printer',
+                                name: job['job-name'] || 'Untitled',
+                                status: job['job-state'] === 3 ? 'pending' :
+                                         job['job-state'] === 4 ? 'processing' :
+                                         job['job-state'] === 5 ? 'completed' :
+                                         job['job-state'] === 6 ? 'canceled' :
+                                         job['job-state'] === 7 ? 'aborted' : 'stopped',
+                                submittedAt: job['job-creation-time'] ?
+                                    new Date(job['job-creation-time'] * 1000).toISOString() :
+                                    new Date().toISOString(),
+                                userName: job['job-originating-user-name'] || 'Unknown User',
+                                pages: job['job-pages'] || 0
                             });
                         }
                     });
                 }
-                
+
+                log('INFO', `找到 ${jobs.length} 个任务`);
+
                 resolve({ success: true, jobs });
             });
         });
     } catch (error) {
-        console.error('获取打印任务异常:', error);
-        return { success: false, message: '获取打印任务失败', error: error.message };
+        log('ERROR', '获取打印任务异常', { error: error.message });
+        return {
+            success: false,
+            message: '获取打印任务失败',
+            error: error.message
+        };
     }
 }
 
@@ -669,7 +791,7 @@ function readHistory() {
         }
         return [];
     } catch (error) {
-        console.error('读取历史记录失败:', error);
+        log('ERROR', '读取历史记录失败', { error: error.message });
         return [];
     }
 }
@@ -679,7 +801,7 @@ function saveHistory(history) {
     try {
         fs.writeFileSync(HISTORY_FILE, JSON.stringify(history, null, 2));
     } catch (error) {
-        console.error('保存历史记录失败:', error);
+        log('ERROR', '保存历史记录失败', { error: error.message });
     }
 }
 
@@ -694,7 +816,7 @@ function formatFileSize(bytes) {
 
 // 错误处理
 app.use((err, req, res, next) => {
-    console.error(err.stack);
+    log('ERROR', '服务器错误', { error: err.message, stack: err.stack });
 
     // Multer错误
     if (err.code === 'LIMIT_FILE_SIZE') {
@@ -704,7 +826,7 @@ app.use((err, req, res, next) => {
         });
     }
 
-    res.json({
+    res.status(500).json({
         success: false,
         message: err.message || '服务器内部错误'
     });
@@ -712,9 +834,13 @@ app.use((err, req, res, next) => {
 
 // 启动服务器
 app.listen(PORT, () => {
-    console.log(`远程打印机服务已启动: http://localhost:${PORT}`);
+    console.log('====================================');
+    console.log('远程打印机服务已启动');
+    console.log('====================================');
+    console.log(`服务地址: http://localhost:${PORT}`);
     console.log(`CUPS服务地址: ${CUPS_BASE_URL}`);
     console.log(`已配置用户: ${Object.keys(USERS).join(', ')}`);
+    console.log('====================================\n');
 });
 
 module.exports = app;

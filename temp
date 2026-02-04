@@ -1,4 +1,5 @@
-Remote printer文件夹是我创建的用于开发远程打印机应用的工程文件夹。对于该应用的要求已经在Prompt文件中进行了描述。请根据要求在Remote printer文件夹中创建项目
+Remote printer文件夹是我创建的用于开发远程打印机应用的工程文件夹。对于该应用的要求已经在Prompt文件中进行了描述。
+请根据要求在Remote printer文件夹中创建项目
 
 
 setx PATH "%PATH%;C:\Users\pennliu\AppData\Roaming\npm"
