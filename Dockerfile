@@ -1,7 +1,7 @@
 FROM node:18-alpine
 
 # 安装必要的系统依赖
-RUN apk add --no-cache curl
+RUN apk add --no-cache curl libreoffice ttf-dejavu
 
 # 设置工作目录
 WORKDIR /app

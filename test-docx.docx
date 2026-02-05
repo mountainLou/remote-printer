@@ -1,0 +1,16 @@
+This is a test document for docx to PDF conversion.
+
+Testing the remote printer service's ability to convert docx files to PDF before printing.
+
+Document created on: 2026-02-05
+
+=== Test Content ===
+
+1. This is a numbered list item
+2. This is another numbered list item
+3. This is the third item
+
+**Bold text** and *italic text* should be preserved in the conversion.
+
+[Hyperlink test](http://localhost:3000)
+

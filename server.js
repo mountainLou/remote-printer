@@ -5,7 +5,6 @@ const path = require('path');
 const fs = require('fs');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
-const { fileTypeFromBuffer } = require('file-type');
 const crypto = require('crypto');
 const ipp = require('ipp');
 require('dotenv').config();
@@ -129,6 +128,16 @@ app.use(express.static(path.join(__dirname, 'public')));
 // 重定向到登录页面
 app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+// 健康检查端点（用于Docker健康检查）
+app.get('/health', (req, res) => {
+    res.status(200).json({
+        status: 'ok',
+        timestamp: new Date().toISOString(),
+        service: 'remote-printer',
+        version: 'v1.01'
+    });
 });
 
 // 允许的文件类型
@@ -388,7 +397,7 @@ app.get('/api/history', authenticateToken, (req, res) => {
     const history = readHistory();
     res.json({
         success: true,
-        history: history.slice(0, 50) // 最多返回50条记录
+        history: history.slice(0, 5) // 最多返回5条记录
     });
 });
 
@@ -420,6 +429,7 @@ app.post('/api/print', authenticateToken, upload.single('file'), async (req, res
         });
 
         // 验证文件类型
+        const { fileTypeFromBuffer } = await import('file-type');
         const fileType = await fileTypeFromBuffer(fs.readFileSync(req.file.path));
         if (fileType && !ALLOWED_MIME_TYPES.includes(fileType.mime)) {
             fs.unlinkSync(req.file.path);
@@ -429,8 +439,50 @@ app.post('/api/print', authenticateToken, upload.single('file'), async (req, res
             });
         }
 
+        // 处理docx文件：转换为PDF
+        let finalFilePath = req.file.path;
+        let finalFileName = req.file.originalname;
+        
+        if (req.file.originalname.toLowerCase().endsWith('.docx')) {
+            try {
+                log('INFO', '正在将docx文件转换为PDF', { filename: req.file.originalname });
+                
+                // 创建临时PDF文件路径
+                const pdfPath = req.file.path.replace('.docx', '.pdf');
+                
+                // 使用LibreOffice命令行工具转换docx到PDF
+                const { execSync } = require('child_process');
+                
+                // 执行LibreOffice转换命令
+                execSync(`libreoffice --headless --convert-to pdf --outdir "${path.dirname(req.file.path)}" "${req.file.path}"`);
+                
+                // 验证PDF文件是否生成
+                if (!fs.existsSync(pdfPath)) {
+                    throw new Error('PDF文件生成失败');
+                }
+                
+                // 更新文件路径和名称
+                finalFilePath = pdfPath;
+                finalFileName = req.file.originalname.replace('.docx', '.pdf');
+                
+                log('INFO', 'docx文件转换为PDF成功', { original: req.file.originalname, converted: finalFileName });
+                
+            } catch (error) {
+                log('ERROR', 'docx文件转换为PDF失败', { error: error.message });
+                // 如果转换失败，继续使用原始文件
+                if (fs.existsSync(req.file.path)) {
+                    fs.unlinkSync(req.file.path);
+                }
+                return res.json({
+                    success: false,
+                    message: 'DOCX文件转换为PDF失败，请尝试直接上传PDF文件',
+                    error: error.message
+                });
+            }
+        }
+
         // 读取文件内容
-        const fileContent = fs.readFileSync(req.file.path);
+        const fileContent = fs.readFileSync(finalFilePath);
 
         // 创建IPP打印请求
         const printerUrl = `${CUPS_BASE_URL}/printers/${encodeURIComponent(printer)}`;
@@ -438,7 +490,11 @@ app.post('/api/print', authenticateToken, upload.single('file'), async (req, res
 
         // 确定文档格式
         let documentFormat = 'application/octet-stream';
-        if (fileType) {
+        
+        // 如果是转换后的PDF文件，强制使用PDF格式
+        if (finalFileName.toLowerCase().endsWith('.pdf')) {
+            documentFormat = 'application/pdf';
+        } else if (fileType) {
             // 检查打印机是否支持该格式
             const supportedFormats = [
                 'application/pdf',
@@ -467,7 +523,7 @@ app.post('/api/print', authenticateToken, upload.single('file'), async (req, res
         const printJob = {
             'operation-attributes-tag': {
                 'requesting-user-name': req.user.username,
-                'job-name': req.file.originalname,
+                'job-name': finalFileName,
                 'document-format': documentFormat
             },
             'job-attributes-tag': {
@@ -493,8 +549,13 @@ app.post('/api/print', authenticateToken, upload.single('file'), async (req, res
         printerClient.execute('Print-Job', printJob, (err, response) => {
             callbackCalled = true;
             
-            // 清理上传的文件
-            fs.unlinkSync(req.file.path);
+            // 清理文件：删除原始文件和临时PDF文件
+            if (fs.existsSync(req.file.path)) {
+                fs.unlinkSync(req.file.path);
+            }
+            if (finalFilePath !== req.file.path && fs.existsSync(finalFilePath)) {
+                fs.unlinkSync(finalFilePath);
+            }
 
             if (err) {
                 console.log('=== 打印错误详情 ===');
@@ -528,12 +589,19 @@ app.post('/api/print', authenticateToken, upload.single('file'), async (req, res
             const history = readHistory();
             
             // 修复文件名编码问题
-            let filename = req.file.originalname;
+            let filename = finalFileName;
             try {
                 // 尝试修复 UTF-8 编码
                 filename = Buffer.from(filename, 'latin1').toString('utf8');
             } catch (e) {
                 // 如果转换失败，保持原样
+            }
+            
+            // 获取文件大小（如果是转换后的PDF，使用转换后的文件大小）
+            let fileSize = req.file.size;
+            if (finalFilePath !== req.file.path && fs.existsSync(finalFilePath)) {
+                const stats = fs.statSync(finalFilePath);
+                fileSize = stats.size;
             }
             
             const historyRecord = {
@@ -542,7 +610,7 @@ app.post('/api/print', authenticateToken, upload.single('file'), async (req, res
                 printer: printer,
                 printedAt: new Date().toISOString(),
                 status: 'success',
-                size: formatFileSize(req.file.size),
+                size: formatFileSize(fileSize),
                 user: req.user.username
             };
 
@@ -996,6 +1064,11 @@ async function getJobs() {
                                              jobState === 6 || jobState === 'canceled' || jobState === 'cancelled' ? 'cancelled' :
                                              jobState === 7 || jobState === 'aborted' ? 'aborted' :
                                              jobState === 'stopped' ? 'stopped' : 'pending';
+                            
+                            // 只显示处理中和可取消的任务，过滤掉已完成和已取消的任务
+                            if (statusText === 'completed' || statusText === 'cancelled') {
+                                return; // 跳过已完成和已取消的任务
+                            }
 
                             // 处理提交时间
                             let submittedAt;
